@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>研習成果展示板</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        body { font-family: 'Noto Sans TC', sans-serif; background-color: #f1f5f9; }
+        .glass-card {
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1);
+        }
+    </style>
+</head>
+<body class="min-h-screen p-4 md:p-8">
+
+    <div class="max-w-5xl mx-auto space-y-8">
+        <!-- 標題區 -->
+        <div class="text-center">
+            <h1 class="text-4xl font-bold text-slate-800 mb-2"><i class="fa-solid fa-rocket text-blue-500 mr-3"></i>AI 研習成果展示板</h1>
+            <p class="text-slate-600">請將您剛剛完成的 GitHub Pages 網址提交到這裡！</p>
+        </div>
+
+        <div class="grid md:grid-cols-3 gap-8">
+            <!-- 左側：繳交表單區 -->
+            <div class="md:col-span-1 glass-card rounded-2xl p-6 h-fit sticky top-8">
+                <h2 class="text-2xl font-bold text-slate-800 mb-6 border-b pb-2">📤 繳交作業</h2>
+                <form id="submitForm" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">您的姓名 / 學校</label>
+                        <input type="text" id="teacherName" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition" placeholder="例如：王小明 老師">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">GitHub Pages 網址</label>
+                        <input type="url" id="githubUrl" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition" placeholder="https://您的帳號.github.io/專案名/">
+                    </div>
+                    <button type="submit" id="submitBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition duration-200 flex justify-center items-center">
+                        <i class="fa-solid fa-paper-plane mr-2"></i> 發射送出！
+                    </button>
+                </form>
+                <div id="statusMessage" class="mt-4 text-center text-sm font-bold hidden"></div>
+            </div>
+
+            <!-- 右側：即時展示牆 -->
+            <div class="md:col-span-2 glass-card rounded-2xl p-6">
+                <div class="flex justify-between items-center mb-6 border-b pb-2">
+                    <h2 class="text-2xl font-bold text-slate-800">🌟 英雄榜 (即時更新)</h2>
+                    <span id="totalCount" class="bg-blue-100 text-blue-800 text-sm font-medium px-3 py-1 rounded-full">已收到 0 件作品</span>
+                </div>
+                
+                <!-- 列表容器 -->
+                <div id="submissionsList" class="grid sm:grid-cols-2 gap-4">
+                    <!-- 卡片模板將透過 JS 插入這裡 -->
+                    <div class="text-center text-slate-400 py-10 col-span-2" id="emptyState">
+                        <i class="fa-regular fa-folder-open text-4xl mb-3"></i>
+                        <p>等待第一位英雄上傳作品...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Firebase SDK (模組化版本) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
+
+        // 自動抓取當前預覽環境的 Firebase 設定（若無則使用預設）
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            apiKey: "請替換成您的_API_KEY",
+            authDomain: "請替換成您的_AUTH_DOMAIN",
+            projectId: "請替換成您的_PROJECT_ID",
+            storageBucket: "請替換成您的_STORAGE_BUCKET",
+            messagingSenderId: "請替換成您的_MESSAGING_SENDER_ID",
+            appId: "請替換成您的_APP_ID"
+        };
+
+        // 初始化 Firebase 與 Firestore
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        
+        // 依照安全規範，使用特定的公用資料儲存路徑
+        const collectionName = "workshop_submissions";
+        const submissionsRef = collection(db, 'artifacts', appId, 'public', 'data', collectionName);
+
+        // UI 元素
+        const form = document.getElementById('submitForm');
+        const submitBtn = document.getElementById('submitBtn');
+        const statusMessage = document.getElementById('statusMessage');
+        const listContainer = document.getElementById('submissionsList');
+        const emptyState = document.getElementById('emptyState');
+        const totalCount = document.getElementById('totalCount');
+        
+        let currentUser = null;
+
+        // 功能 1：處理身分驗證 (存取資料庫前必須先驗證)
+        const initAuth = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Auth error:", error);
+                statusMessage.textContent = "系統連線初始化失敗，請稍後再試。";
+                statusMessage.className = "mt-4 text-center text-sm font-bold text-red-600 block";
+            }
+        };
+        initAuth();
+
+        // 功能 2：即時監聽並顯示資料 (Realtime Updates)
+        onAuthStateChanged(auth, (user) => {
+            currentUser = user;
+            if (user) {
+                // 不使用 orderBy，避免在此環境需要額外建立資料庫索引，改以 JavaScript 前端排序
+                const q = query(submissionsRef);
+
+                onSnapshot(q, (snapshot) => {
+                    const submissions = [];
+                    snapshot.forEach((doc) => {
+                        submissions.push({ id: doc.id, ...doc.data() });
+                    });
+
+                    // 在前端將資料依照時間 (新到舊) 排序
+                    submissions.sort((a, b) => {
+                        const timeA = a.timestamp ? a.timestamp.toMillis() : Date.now();
+                        const timeB = b.timestamp ? b.timestamp.toMillis() : Date.now();
+                        return timeB - timeA;
+                    });
+
+                    // 更新總數
+                    totalCount.textContent = `已收到 ${submissions.length} 件作品`;
+
+                    // 更新畫面
+                    if (submissions.length === 0) {
+                        emptyState.style.display = 'block';
+                        listContainer.innerHTML = '';
+                        listContainer.appendChild(emptyState);
+                    } else {
+                        emptyState.style.display = 'none';
+                        listContainer.innerHTML = ''; // 清空現有列表
+
+                        submissions.forEach((item) => {
+                            // 格式化時間
+                            let timeString = "剛剛";
+                            if (item.timestamp) {
+                                const date = item.timestamp.toDate();
+                                timeString = `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+                            }
+
+                            // 建立卡片 HTML
+                            const card = document.createElement('div');
+                            card.className = "bg-white p-4 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition group relative overflow-hidden";
+                            card.innerHTML = `
+                                <div class="absolute top-0 left-0 w-1 h-full bg-blue-500"></div>
+                                <div class="flex justify-between items-start mb-2">
+                                    <h3 class="font-bold text-slate-800 text-lg flex items-center">
+                                        <i class="fa-solid fa-user-astronaut text-slate-400 mr-2 text-sm"></i>
+                                        ${item.name}
+                                    </h3>
+                                    <span class="text-xs text-slate-400 bg-slate-100 px-2 py-1 rounded">${timeString}</span>
+                                </div>
+                                <a href="${item.url}" target="_blank" class="text-sm text-blue-600 hover:text-blue-800 break-all flex items-center mt-3 group-hover:underline">
+                                    <i class="fa-solid fa-link mr-1"></i> 前往查看作品
+                                </a>
+                            `;
+                            listContainer.appendChild(card);
+                        });
+                    }
+                }, (error) => {
+                    console.error("Snapshot error: ", error);
+                });
+            }
+        });
+
+        // 功能 3：寫入資料 (提交表單)
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault(); 
+            
+            if (!currentUser) {
+                statusMessage.textContent = "尚未與伺服器建立連線，請稍候...";
+                statusMessage.className = "mt-4 text-center text-sm font-bold text-red-600 block";
+                return;
+            }
+            
+            const name = document.getElementById('teacherName').value;
+            const url = document.getElementById('githubUrl').value;
+
+            // 改變按鈕狀態
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-2"></i> 上傳中...';
+
+            try {
+                // 將資料新增到 Firestore
+                await addDoc(submissionsRef, {
+                    name: name,
+                    url: url,
+                    timestamp: serverTimestamp() 
+                });
+
+                // 成功提示
+                statusMessage.textContent = "🎉 提交成功！請看右側看板！";
+                statusMessage.className = "mt-4 text-center text-sm font-bold text-green-600 block";
+                form.reset(); 
+
+            } catch (error) {
+                console.error("寫入錯誤: ", error);
+                statusMessage.textContent = "❌ 提交失敗，請檢查網路或權限。";
+                statusMessage.className = "mt-4 text-center text-sm font-bold text-red-600 block";
+            } finally {
+                // 恢復按鈕狀態
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<i class="fa-solid fa-paper-plane mr-2"></i> 發射送出！';
+                
+                // 3秒後隱藏成功提示
+                setTimeout(() => { 
+                    if(statusMessage.textContent.includes("成功")) {
+                        statusMessage.classList.add('hidden'); 
+                    }
+                }, 3000);
+            }
+        });
+    </script>
+</body>
+</html>
